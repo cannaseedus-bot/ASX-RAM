@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "asx.flashram.event.schema.json",
+  "title": "ASX_FLASH_RAM_V1 Event",
+  "type": "object",
+  "required": ["ts", "event_id", "type", "node", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "ts": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonic event timestamp (logical clock)"
+    },
+    "event_id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "SHA-256 lowercase hex or deterministic ID"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "PAGE_CREATE",
+        "PAGE_DELETE",
+        "PAGE_MOVE",
+        "OBJECT_WRITE",
+        "OBJECT_DELETE",
+        "TIER_EVICT",
+        "NODE_REGISTER",
+        "NODE_REMOVE"
+      ]
+    },
+    "node": {
+      "type": "string",
+      "minLength": 1
+    },
+    "payload": {
+      "type": "object"
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "const": "PAGE_MOVE" } } },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["page_id", "from", "to", "reason"],
+            "additionalProperties": false,
+            "properties": {
+              "page_id": { "type": "string" },
+              "from": { "enum": ["T0", "T1", "T2"] },
+              "to": { "enum": ["T0", "T1", "T2"] },
+              "reason": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "OBJECT_WRITE" } } },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["object_id", "data"],
+            "additionalProperties": false,
+            "properties": {
+              "object_id": { "type": "string" },
+              "data": { "type": "object" }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
