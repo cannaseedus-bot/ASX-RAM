@@ -135,3 +135,16 @@ Expected result:
 
 Expected result:
 - Stable flash-RAM software behavior across environments with deterministic ABI lock + replay.
+
+---
+
+## 7) Normative artifacts to keep in sync
+
+- [ ] `specs/ASX_FLASH_RAM_V1.md` (formal memory law)
+- [ ] `schemas/asx.flashram.event.schema.json` (event schema)
+- [ ] `src/java/CanonicalJsonValidator.java` (canonical JSON + SHA-256 reference)
+- [ ] `specs/REPLAY_ENGINE_SPEC.md` (deterministic replay pseudocode)
+
+Expected result:
+- Build/boot checklist and formal law artifacts remain aligned for conformance.
+
