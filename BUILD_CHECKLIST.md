@@ -1,103 +1,137 @@
-# ASX-RAM Build & Boot Checklist (Extracted from `README.md`)
+# ASX-RAM Build & Boot Checklist (Flash-RAM Style, PowerShell-Orchestrated)
 
-> This repository is spec-first. There is no package manager build pipeline in the repo right now; the concrete "build" path described in the spec is the ABI-lock generation + boot enforcement flow.
+> ASX-RAM is operated like a **software flash-RAM/VRAM analog**: JSON-defined runtime cluster nodes emulate memory controllers and tiers in software (not hardware). PowerShell is the orchestrator; Java is compiled with `javac` for math/compression/protocol/API/storage modules.
+
+## 0) Target architecture (must be explicit)
+
+- [ ] Treat runtime as a **JSON memory fabric** with cluster nodes (`node_id`, `tier`, `role`, `capacity`, `policy`).
+- [ ] Model tiers as software memory lanes:
+  - `T0` hot working-set lane (VRAM-like fast lane)
+  - `T1` IDB structured persistent lane
+  - `T2` file-mapped/SQL-backed persistent lane
+- [ ] Keep node state and movement decisions JSON-canonical for deterministic replay.
+
+Expected result:
+- The system behaves like “flash RAM in software”: deterministic page movement across JSON runtime nodes.
+
+---
 
 ## 1) Prerequisites
 
-- [ ] **Java 8+** (for the reference `computeAbiHashV1` implementation).
-- [ ] **Python 3.8+** (for the reference `compute_abi_hash_v1` implementation).
-- [ ] **Node.js 18+** (for WebCrypto `crypto.subtle.digest` in the JS reference).
-- [ ] **Input artifacts prepared**:
-  - A directory of `*.jar` files.
-  - `grammar` bytes file.
-  - canonical JSON bytes for golden vectors.
+- [ ] **PowerShell 7+** (primary orchestrator for build/boot/control-plane scripts).
+- [ ] **JDK 17+** (`javac` + `java`; source-first workflow).
+- [ ] **Node.js 18+** (JSON/IDB tooling where needed).
+- [ ] **SQL backend** (SQLite/Postgres/etc.) for indexed object/query plane.
+- [ ] Repository directories:
+  - `src/java/` Java source modules.
+  - `state/` boot locks + runtime snapshots.
+  - `filemap/` folder-mapped assets declared by JSON descriptors.
 
 Expected result:
-- You can hash all inputs and produce a deterministic 64-hex `abi_hash`.
+- Environment is ready to compile Java sources and run full orchestration via PowerShell.
 
 ---
 
-## 2) Compute `abi_hash`
+## 2) Build Java modules with `javac` (no JAR pipeline)
 
-Use one runtime (Java / JS / Python), but all runtimes should produce the **same hash** for the same inputs.
-
-### Option A: Python (quickest local check)
-
-```bash
-python3 - <<'PY'
-import hashlib, json, pathlib
-
-def sha256_hex(b: bytes) -> str:
-    return hashlib.sha256(b).hexdigest()
-
-def canon_jar_set_json(jars: dict) -> bytes:
-    items = [{"name": k, "sha256": jars[k]} for k in sorted(jars)]
-    s = '{"jars":[' + ",".join(
-        '{"name":"%s","sha256":"%s"}' % (
-            i["name"].replace('\\', '\\\\').replace('"', '\\"'),
-            i["sha256"],
-        )
-        for i in items
-    ) + ']}'
-    return s.encode('utf-8')
-
-def compute_abi_hash_v1(jars, grammar_bytes, golden_canon_bytes):
-    jar_set_hash = sha256_hex(canon_jar_set_json(jars))
-    grammar_hash = sha256_hex(grammar_bytes)
-    golden_hash  = sha256_hex(golden_canon_bytes)
-    abi_material = (
-        "ASX_ABI_V1\n" +
-        jar_set_hash + "\n" +
-        grammar_hash + "\n" +
-        golden_hash + "\n"
-    ).encode('utf-8')
-    return sha256_hex(abi_material)
-
-jar_dir = pathlib.Path("./jars")
-grammar_path = pathlib.Path("./grammar.bin")
-golden_path = pathlib.Path("./golden.canon.json")
-
-jars = {p.name: sha256_hex(p.read_bytes()) for p in jar_dir.glob("*.jar")}
-abi_hash = compute_abi_hash_v1(jars, grammar_path.read_bytes(), golden_path.read_bytes())
-print(abi_hash)
-PY
+```powershell
+New-Item -ItemType Directory -Force out | Out-Null
+$javaSources = Get-ChildItem -Path ./src/java -Filter *.java -Recurse | ForEach-Object FullName
+if (-not $javaSources) { throw "No Java source files found under ./src/java" }
+javac -encoding UTF-8 -d ./out $javaSources
 ```
 
 Expected result:
-- Prints exactly one lowercase SHA-256 hex digest (`^[a-f0-9]{64}$`).
+- `.class` outputs in `./out`.
+- Math/compression/protocol/API/storage software modules are compiled and loadable by orchestrator.
 
 ---
 
-## 3) Lock hash into pager state
+## 3) Generate deterministic `abi_hash` for cluster boot lock
 
-- [ ] Write the computed value into the pager lock field (`pagebook.abi.abi_hash` / boot lock state).
+Compute ABI lock from JSON-canonical source manifest + grammar bytes + golden vectors.
+
+```powershell
+$ErrorActionPreference = 'Stop'
+
+function Get-Sha256Hex([byte[]]$bytes) {
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  try { ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) -join '' }
+  finally { $sha.Dispose() }
+}
+
+$grammarBytes = [IO.File]::ReadAllBytes('./grammar.bin')
+$goldenBytes  = [IO.File]::ReadAllBytes('./golden.canon.json')
+
+$srcEntries = Get-ChildItem ./src/java -Recurse -File |
+  Sort-Object FullName |
+  ForEach-Object {
+    $rel = Resolve-Path -Relative $_.FullName
+    $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+    @{ path = $rel; sha256 = $h }
+  }
+
+$clusterLock = @{
+  runtime = 'ASX_FLASH_RAM_V1'
+  java_sources = $srcEntries
+} | ConvertTo-Json -Depth 12 -Compress
+
+$manifestHash = Get-Sha256Hex([Text.Encoding]::UTF8.GetBytes($clusterLock))
+$grammarHash  = Get-Sha256Hex($grammarBytes)
+$goldenHash   = Get-Sha256Hex($goldenBytes)
+
+$abiMaterial = "ASX_ABI_V1`n$manifestHash`n$grammarHash`n$goldenHash`n"
+$abiHash = Get-Sha256Hex([Text.Encoding]::UTF8.GetBytes($abiMaterial))
+
+New-Item -ItemType Directory -Force ./state | Out-Null
+@{ abi_hash = $abiHash; runtime = 'ASX_FLASH_RAM_V1' } |
+  ConvertTo-Json -Compress |
+  Set-Content -Encoding UTF8 ./state/abi.lock.json
+
+$abiHash
+```
 
 Expected result:
-- Boot path has a pinned expected `abi_hash` to compare against.
+- Single lowercase 64-hex hash printed.
+- Lock file written to `./state/abi.lock.json`.
 
 ---
 
-## 4) Run boot enforcement checks
+## 4) Boot sequence (PowerShell control plane)
 
-At boot, execute this sequence strictly:
-
-1. load grammar
+1. load grammar bytes
 2. load golden vectors
-3. scan JAR directory
-4. compute `abi_hash`
-5. compare to locked `pagebook.abi.abi_hash`
+3. load runtime node JSON + source/file manifests
+4. recompute `abi_hash`
+5. compare to `state/abi.lock.json`
+6. enforce result:
+   - match: enable cluster services
+   - mismatch: hard fail boot and block writes/mutations
 
 Expected result:
-- **Match** → paging/gRPC/inference can proceed.
-- **Mismatch** → **HARD FAIL**: disable OPFS, disable gRPC, refuse inference.
+- Only ABI-locked node clusters are allowed to serve storage/API traffic.
 
 ---
 
-## 5) Determinism acceptance checks
+## 5) JSON runtime cluster node checks (flash-RAM behavior)
 
-- [ ] Run the hash computation in at least **two runtimes** (e.g., Python + JavaScript).
-- [ ] Verify both outputs are bit-identical.
-- [ ] Re-run after file ordering changes in JAR directory; output should remain unchanged.
+- [ ] Each node has JSON identity + role (`controller`, `pager`, `index`, `storage`).
+- [ ] Page/object motion is represented as append-only JSON events.
+- [ ] IDB persists browser-local objects (`T1`).
+- [ ] SQL indexes/query-accelerates JSON objects (`T2` control/index plane).
+- [ ] `filemap/` binds JSON file IDs to concrete folders/files for any asset type.
 
 Expected result:
-- Stable deterministic `abi_hash` regardless of runtime or JAR listing order.
+- Software nodes mimic VRAM-like movement semantics with deterministic, JSON-defined state transitions.
+
+---
+
+## 6) Determinism acceptance checks
+
+- [ ] Run lock generation twice with unchanged inputs; hash must match.
+- [ ] Change file discovery order; hash remains identical (sorted manifest).
+- [ ] Run on another machine/OS; hash remains identical.
+- [ ] Replay identical JSON event stream; node placement/actions remain identical.
+
+Expected result:
+- Stable flash-RAM software behavior across environments with deterministic ABI lock + replay.
